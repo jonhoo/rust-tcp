@@ -310,63 +310,10 @@ impl Connection {
     }
 }
 
+fn wrapping_lt(lhs:u32, rhs: u32) -> bool {
+    lhs.wrapping_sub(rhs) > u32::max_value() >> 1 
+}
+
 fn is_between_wrapped(start: u32, x: u32, end: u32) -> bool {
-    use std::cmp::Ordering;
-    match start.cmp(&x) {
-        Ordering::Equal => return false,
-        Ordering::Less => {
-            // we have:
-            //
-            //   0 |-------------S------X---------------------| (wraparound)
-            //
-            // X is between S and E (S < X < E) in these cases:
-            //
-            //   0 |-------------S------X---E-----------------| (wraparound)
-            //
-            //   0 |----------E--S------X---------------------| (wraparound)
-            //
-            // but *not* in these cases
-            //
-            //   0 |-------------S--E---X---------------------| (wraparound)
-            //
-            //   0 |-------------|------X---------------------| (wraparound)
-            //                   ^-S+E
-            //
-            //   0 |-------------S------|---------------------| (wraparound)
-            //                      X+E-^
-            //
-            // or, in other words, iff !(S <= E <= X)
-            if end >= start && end <= x {
-                return false;
-            }
-        }
-        Ordering::Greater => {
-            // we have the opposite of above:
-            //
-            //   0 |-------------X------S---------------------| (wraparound)
-            //
-            // X is between S and E (S < X < E) *only* in this case:
-            //
-            //   0 |-------------X--E---S---------------------| (wraparound)
-            //
-            // but *not* in these cases
-            //
-            //   0 |-------------X------S---E-----------------| (wraparound)
-            //
-            //   0 |----------E--X------S---------------------| (wraparound)
-            //
-            //   0 |-------------|------S---------------------| (wraparound)
-            //                   ^-X+E
-            //
-            //   0 |-------------X------|---------------------| (wraparound)
-            //                      S+E-^
-            //
-            // or, in other words, iff S < E < X
-            if end < start && end > x {
-            } else {
-                return false;
-            }
-        }
-    }
-    true
+    wrapping_lt(start, x) && wrapping_lt(x, end)
 }
