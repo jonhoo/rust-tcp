@@ -623,6 +623,7 @@ dependencies = [
 name = "trust"
 version = "0.1.0"
 dependencies = [
+ "bitflags 1.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "etherparse 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tun-tap 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
