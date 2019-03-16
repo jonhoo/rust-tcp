@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io;
 
 enum State {
@@ -24,6 +25,9 @@ pub struct Connection {
     recv: RecvSequenceSpace,
     ip: etherparse::Ipv4Header,
     tcp: etherparse::TcpHeader,
+
+    pub(crate) incoming: VecDeque<u8>,
+    pub(crate) unacked: VecDeque<u8>,
 }
 
 /// State of the Send Sequence Space (RFC 793 S3.2 F4)
@@ -86,7 +90,7 @@ impl Connection {
         tcph: etherparse::TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> io::Result<Option<Self>> {
-        let mut buf = [0u8; 1500];
+        let buf = [0u8; 1500];
         if !tcph.syn() {
             // only expected SYN packet
             return Ok(None);
@@ -130,6 +134,9 @@ impl Connection {
                     iph.source()[3],
                 ],
             ),
+
+            incoming: Default::default(),
+            unacked: Default::default(),
         };
 
         // need to start establishing a connection
@@ -310,7 +317,7 @@ impl Connection {
     }
 }
 
-fn wrapping_lt(lhs:u32, rhs: u32) -> bool {
+fn wrapping_lt(lhs: u32, rhs: u32) -> bool {
     // From RFC1323:
     //     TCP determines if a data segment is "old" or "new" by testing
     //     whether its sequence number is within 2**31 bytes of the left edge
@@ -318,7 +325,7 @@ fn wrapping_lt(lhs:u32, rhs: u32) -> bool {
     //     insure that new data is never mistakenly considered old and vice-
     //     versa, the left edge of the sender's window has to be at most
     //     2**31 away from the right edge of the receiver's window.
-    lhs.wrapping_sub(rhs) > 2^31 
+    lhs.wrapping_sub(rhs) > 2 ^ 31
 }
 
 fn is_between_wrapped(start: u32, x: u32, end: u32) -> bool {

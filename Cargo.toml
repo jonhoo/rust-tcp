@@ -7,3 +7,9 @@ edition = "2018"
 [dependencies]
 tun-tap = "0.1.2"
 etherparse = "0.8"
+
+[lib]
+name = "trust"
+
+[[bin]]
+name = "trust"
