@@ -357,7 +357,7 @@ fn wrapping_lt(lhs: u32, rhs: u32) -> bool {
     //     insure that new data is never mistakenly considered old and vice-
     //     versa, the left edge of the sender's window has to be at most
     //     2**31 away from the right edge of the receiver's window.
-    lhs.wrapping_sub(rhs) > 2 ^ 31
+    lhs.wrapping_sub(rhs) > (1 << 31)
 }
 
 fn is_between_wrapped(start: u32, x: u32, end: u32) -> bool {
