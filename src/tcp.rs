@@ -194,22 +194,17 @@ impl Connection {
 
     fn write(&mut self, nic: &mut tun_tap::Iface, seq: u32, mut limit: usize) -> io::Result<usize> {
         let mut buf = [0u8; 1500];
-        // self.tcp.sequence_number = self.send.nxt;
         self.tcp.sequence_number = seq;
         self.tcp.acknowledgment_number = self.recv.nxt;
-        //if !self.tcp.syn && !self.tcp.fin {
-        //    self.tcp.psh = true;
-        //}
 
         // TODO: return +1 for SYN/FIN
         println!(
-            "write(seq: {}, limit: {}) syn {:?} fin {:?}",
-            seq, limit, self.tcp.syn, self.tcp.fin,
+            "write(ack: {}, seq: {}, limit: {}) syn {:?} fin {:?}",
+            self.recv.nxt - self.recv.irs, seq, limit, self.tcp.syn, self.tcp.fin,
         );
 
         let mut offset = seq.wrapping_sub(self.send.una) as usize;
         // we need to special-case the two "virtual" bytes SYN and FIN
-        println!("FIN close {:?}", self.closed_at);
         if let Some(closed_at) = self.closed_at {
             if seq == closed_at.wrapping_add(1) {
                 // trying to write following FIN
@@ -320,8 +315,16 @@ impl Connection {
     }
 
     pub(crate) fn on_tick(&mut self, nic: &mut tun_tap::Iface) -> io::Result<()> {
-        let nunacked = self.send.nxt.wrapping_sub(self.send.una);
-        let unsent = self.unacked.len() as u32 - nunacked;
+        if let State::FinWait2 | State::TimeWait = self.state {
+            // we have shutdown our write side and the other side acked, no need to (re)transmit anything
+            return Ok(());
+        }
+
+        // eprintln!("ON TICK: state {:?} una {} nxt {} unacked {:?}",
+        //           self.state, self.send.una, self.send.nxt, self.unacked);
+
+        let nunacked_data = self.closed_at.unwrap_or(self.send.nxt).wrapping_sub(self.send.una);
+        let nunsent_data = self.unacked.len() as u32 - nunacked_data;
 
         let waited_for = self
             .timers
@@ -347,16 +350,16 @@ impl Connection {
             self.write(nic, self.send.una, resend as usize)?;
         } else {
             // we should send new data if we have new data and space in the window
-            if unsent == 0 && self.closed_at.is_some() {
+            if nunsent_data == 0 && self.closed_at.is_some() {
                 return Ok(());
             }
 
-            let allowed = self.send.wnd as u32 - nunacked;
+            let allowed = self.send.wnd as u32 - nunacked_data;
             if allowed == 0 {
                 return Ok(());
             }
 
-            let send = std::cmp::min(unsent, allowed);
+            let send = std::cmp::min(nunsent_data, allowed);
             if send < allowed && self.closed && self.closed_at.is_none() {
                 self.tcp.fin = true;
                 self.closed_at = Some(self.send.una.wrapping_add(self.unacked.len() as u32));
@@ -365,7 +368,6 @@ impl Connection {
             self.write(nic, self.send.nxt, send as usize)?;
         }
 
-        // if FIN, enter FIN-WAIT-1
         Ok(())
     }
 
@@ -452,10 +454,14 @@ impl Connection {
                     ackn, self.send.una, self.unacked
                 );
                 if !self.unacked.is_empty() {
-                    let nacked = self
-                        .unacked
-                        .drain(..ackn.wrapping_sub(self.send.una) as usize)
-                        .count();
+                    let data_start = if self.send.una == self.send.iss {
+                        // send.una hasn't been updated yet with ACK for our SYN, so data starts just beyond it
+                        self.send.una.wrapping_add(1)
+                    } else {
+                        self.send.una
+                    };
+                    let acked_data_end = std::cmp::min(ackn.wrapping_sub(data_start) as usize, self.unacked.len());
+                    self.unacked.drain(..acked_data_end);
 
                     let old = std::mem::replace(&mut self.timers.send_times, BTreeMap::new());
 
@@ -475,47 +481,49 @@ impl Connection {
                 self.send.una = ackn;
             }
 
-            // TODO: prune self.unacked
             // TODO: if unacked empty and waiting flush, notify
             // TODO: update window
         }
 
         if let State::FinWait1 = self.state {
-            if self.send.una == self.send.iss + 2 {
-                // our FIN has been ACKed!
-                self.state = State::FinWait2;
+            if let Some(closed_at) = self.closed_at {
+                if self.send.una == closed_at.wrapping_add(1) {
+                    // our FIN has been ACKed!
+                    self.state = State::FinWait2;
+                }
             }
         }
 
-        if let State::Estab | State::FinWait1 | State::FinWait2 = self.state {
-            let mut unread_data_at = (self.recv.nxt - seqn) as usize;
-            if unread_data_at > data.len() {
-                // we must have received a re-transmitted FIN that we have already seen
-                // nxt points to beyond the fin, but the fin is not in data!
-                assert_eq!(unread_data_at, data.len() + 1);
-                unread_data_at = 0;
+        if !data.is_empty() {
+            if let State::Estab | State::FinWait1 | State::FinWait2 = self.state {
+                let mut unread_data_at = self.recv.nxt.wrapping_sub(seqn) as usize;
+                if unread_data_at > data.len() {
+                    // we must have received a re-transmitted FIN that we have already seen
+                    // nxt points to beyond the fin, but the fin is not in data!
+                    assert_eq!(unread_data_at, data.len() + 1);
+                    unread_data_at = 0;
+                }
+                self.incoming.extend(&data[unread_data_at..]);
+
+                /*
+                Once the TCP takes responsibility for the data it advances
+                RCV.NXT over the data accepted, and adjusts RCV.WND as
+                apporopriate to the current buffer availability.  The total of
+                RCV.NXT and RCV.WND should not be reduced.
+                 */
+                self.recv.nxt = seqn.wrapping_add(data.len() as u32);
+
+                // Send an acknowledgment of the form: <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
+                // TODO: maybe just tick to piggyback ack on data?
+                self.write(nic, self.send.nxt, 0)?;
             }
-            self.incoming.extend(&data[unread_data_at..]);
-
-            /*
-            Once the TCP takes responsibility for the data it advances
-            RCV.NXT over the data accepted, and adjusts RCV.WND as
-            apporopriate to the current buffer availability.  The total of
-            RCV.NXT and RCV.WND should not be reduced.
-            */
-            self.recv.nxt = seqn
-                .wrapping_add(data.len() as u32)
-                .wrapping_add(if tcph.fin() { 1 } else { 0 });
-
-            // Send an acknowledgment of the form: <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
-            // TODO: maybe just tick to piggyback ack on data?
-            self.write(nic, self.send.nxt, 0)?;
         }
 
         if tcph.fin() {
             match self.state {
                 State::FinWait2 => {
                     // we're done with the connection!
+                    self.recv.nxt = self.recv.nxt.wrapping_add(1);
                     self.write(nic, self.send.nxt, 0)?;
                     self.state = State::TimeWait;
                 }
