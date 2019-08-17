@@ -240,17 +240,19 @@ impl Connection {
         self.ip
             .set_payload_len(size - self.ip.header_len() as usize);
 
-        // the kernel is nice and does this for us
-        self.tcp.checksum = self
-            .tcp
-            .calc_checksum_ipv4(&self.ip, &[])
-            .expect("failed to compute checksum");
-
-        // write out the headers
+        // write out the headers and the payload
         use std::io::Write;
+        let buf_len = buf.len();
         let mut unwritten = &mut buf[..];
+
         self.ip.write(&mut unwritten);
-        self.tcp.write(&mut unwritten);
+        let ip_header_ends_at = buf_len - unwritten.len();
+
+        // postpone writing the tcp header because we need the payload as one contiguous slice to calculate the tcp checksum
+        unwritten = &mut unwritten[self.tcp.header_len() as usize..];
+        let tcp_header_ends_at = buf_len - unwritten.len();
+
+        // write out the payload
         let payload_bytes = {
             let mut written = 0;
             let mut limit = max_data;
@@ -265,7 +267,17 @@ impl Connection {
             written += unwritten.write(&t[..p2l])?;
             written
         };
-        let unwritten = unwritten.len();
+        let payload_ends_at = buf_len - unwritten.len();
+
+        // finally we can calculate the tcp checksum and write out the tcp header
+        self.tcp.checksum = self
+            .tcp
+            .calc_checksum_ipv4(&self.ip, &buf[tcp_header_ends_at..payload_ends_at])
+            .expect("failed to compute checksum");
+
+        let mut tcp_header_buf = &mut buf[ip_header_ends_at..tcp_header_ends_at];
+        self.tcp.write(&mut tcp_header_buf);
+
         let mut next_seq = seq.wrapping_add(payload_bytes as u32);
         if self.tcp.syn {
             next_seq = next_seq.wrapping_add(1);
@@ -280,7 +292,7 @@ impl Connection {
         }
         self.timers.send_times.insert(seq, time::Instant::now());
 
-        nic.send(&buf[..buf.len() - unwritten])?;
+        nic.send(&buf[..payload_ends_at])?;
         Ok(payload_bytes)
     }
 
