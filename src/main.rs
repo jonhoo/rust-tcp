@@ -4,11 +4,11 @@ use std::{io, thread};
 fn main() -> io::Result<()> {
     let mut i = trust::Interface::new()?;
     eprintln!("created interface");
-    let mut l1 = i.bind(8000)?;
-    let jh = thread::spawn(move || {
-        while let Ok(mut stream) = l1.accept() {
-            eprintln!("got connection!");
-            stream.write(b"hello").unwrap();
+    let mut listener = i.bind(8000)?;
+    while let Ok(mut stream) = listener.accept() {
+        eprintln!("got connection!");
+        thread::spawn(move || {
+            stream.write(b"hello from rust-tcp!\n").unwrap();
             stream.shutdown(std::net::Shutdown::Write).unwrap();
             loop {
                 let mut buf = [0; 512];
@@ -21,8 +21,7 @@ fn main() -> io::Result<()> {
                     println!("{}", std::str::from_utf8(&buf[..n]).unwrap());
                 }
             }
-        }
-    });
-    jh.join().unwrap();
+        });
+    }
     Ok(())
 }
