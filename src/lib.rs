@@ -1,5 +1,3 @@
-#![feature(duration_float)]
-
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::io::prelude::*;
